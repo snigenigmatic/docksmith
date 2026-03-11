@@ -1,5 +1,9 @@
 # Docksmith
 
+<p align="center">
+  <img src="assets/icon.png" width="200" alt="Docksmith Icon">
+</p>
+
 A simplified Docker-like build and runtime system built from scratch in Go. No daemon, no external container tooling — just Linux OS primitives. Built for Cloud Computing (UE23CS351B) PESU.
 
 Docksmith teaches three things deeply:
