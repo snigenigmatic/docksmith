@@ -3,7 +3,6 @@ pkg := "."
 goflags := "CGO_ENABLED=0"
 ldflags := "-ldflags='-extldflags \"-static\"'"
 
-list:
 
 # Default recipe
 default: build
