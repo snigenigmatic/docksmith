@@ -31,6 +31,13 @@ jobs:
         run: |
           file docksmith | grep -q "statically linked" || (echo "binary is not static" && exit 1)
 
+      - name: Enable unprivileged user namespaces
+        run: |
+          # GitHub Actions runners (Ubuntu 24.04+) restrict CLONE_NEWUSER by default.
+          # Docksmith's container isolation requires it for both RUN during build and
+          # docksmith run. This is a one-line kernel parameter change.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Import Alpine base image
         run: python3 scripts/setup_base.py
 
