@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build static binary
+        run: CGO_ENABLED=0 go build -ldflags='-extldflags "-static"' -o docksmith .
+
+      - name: Verify binary is static
+        run: |
+          file docksmith | grep -q "statically linked" || (echo "binary is not static" && exit 1)
+
+      - name: Import Alpine base image
+        run: python3 scripts/setup_base.py
+
+      - name: Cold build — expect all CACHE MISS
+        run: |
+          output=$(./docksmith build -t myapp:latest sample 2>&1)
+          echo "$output"
+          echo "$output" | grep -q "CACHE MISS" || (echo "expected CACHE MISS on cold build" && exit 1)
+          echo "$output" | grep -qv "CACHE HIT"  || (echo "unexpected CACHE HIT on cold build" && exit 1)
+
+      - name: Warm build — expect all CACHE HIT, identical digest
+        run: |
+          digest_cold=$(./docksmith images | grep myapp | awk '{print $3}')
+          output=$(./docksmith build -t myapp:latest sample 2>&1)
+          echo "$output"
+          echo "$output" | grep -q "CACHE HIT" || (echo "expected CACHE HIT on warm build" && exit 1)
+          echo "$output" | grep -qv "CACHE MISS" || (echo "unexpected CACHE MISS on warm build" && exit 1)
+          digest_warm=$(./docksmith images | grep myapp | awk '{print $3}')
+          [ "$digest_cold" = "$digest_warm" ] || (echo "digest changed on warm rebuild: $digest_cold -> $digest_warm" && exit 1)
+
+      - name: Partial invalidation — edit source file, expect cascade
+        run: |
+          echo "# ci-change" >> sample/run.sh
+          output=$(./docksmith build -t myapp:latest sample 2>&1)
+          echo "$output"
+          echo "$output" | grep "COPY" | grep -q "CACHE MISS" || (echo "expected COPY to be CACHE MISS after source edit" && exit 1)
+          echo "$output" | grep "RUN"  | grep -q "CACHE MISS" || (echo "expected RUN to cascade to CACHE MISS" && exit 1)
+
+      - name: docksmith images — check output columns
+        run: |
+          output=$(./docksmith images)
+          echo "$output"
+          echo "$output" | grep -q "myapp" || (echo "myapp not listed" && exit 1)
+          echo "$output" | grep -q "latest" || (echo "tag not listed" && exit 1)
+
+      - name: docksmith run — container produces output
+        run: |
+          output=$(./docksmith run myapp:latest 2>&1)
+          echo "$output"
+          echo "$output" | grep -q "Docksmith" || (echo "expected output from container" && exit 1)
+          echo "$output" | grep -q "Hello"     || (echo "expected GREETING in output" && exit 1)
+
+      - name: docksmith run -e — env override applied
+        run: |
+          output=$(./docksmith run -e GREETING=Howdy myapp:latest 2>&1)
+          echo "$output"
+          echo "$output" | grep -q "Howdy"  || (echo "env override not applied" && exit 1)
+          echo "$output" | grep -qv "Hello" || (echo "original value leaked through" && exit 1)
+
+      - name: Isolation check — file written inside container must not appear on host
+        run: |
+          ./docksmith run myapp:latest /bin/sh -c "echo secret > /tmp/ds_hostleak.txt"
+          if [ -f /tmp/ds_hostleak.txt ]; then
+            echo "ISOLATION FAILURE: /tmp/ds_hostleak.txt exists on the host"
+            exit 1
+          fi
+          echo "ISOLATION PASS: file not present on host"
+
+      - name: docksmith rmi — manifest and layers removed
+        run: |
+          ./docksmith rmi myapp:latest
+          output=$(./docksmith images)
+          echo "$output"
+          echo "$output" | grep -qv "myapp" || (echo "myapp still listed after rmi" && exit 1)
+
+      - name: --no-cache build — all steps are CACHE MISS
+        run: |
+          # Re-import base since rmi removed the shared layer
+          python3 scripts/setup_base.py
+          output=$(./docksmith build --no-cache -t myapp:latest sample 2>&1)
+          echo "$output"
+          echo "$output" | grep "COPY" | grep -q "CACHE MISS" || (echo "expected CACHE MISS with --no-cache" && exit 1)
+          echo "$output" | grep "RUN"  | grep -q "CACHE MISS" || (echo "expected CACHE MISS with --no-cache" && exit 1)
+          echo "$output" | grep -qv "CACHE HIT" || (echo "unexpected CACHE HIT with --no-cache" && exit 1)
