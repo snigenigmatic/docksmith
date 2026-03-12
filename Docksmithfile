@@ -1,0 +1,7 @@
+FROM alpine:3.18
+WORKDIR /app
+ENV PORT=8080
+COPY . /app
+RUN echo "Hello Docksmith"
+CMD ["python", "main.py"]
+# INVALID_CMD this should fail
