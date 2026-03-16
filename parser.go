@@ -68,7 +68,7 @@ func ParseDocksmithfile(contextDir string) ([]Instruction, error) {
 
 		instructions = append(instructions, Instruction{
 			LineNum: lineNum,
-			Raw:     trimmedLine,
+			Raw:     rawLine,
 			Type:    instrType,
 			Args:    args,
 		})

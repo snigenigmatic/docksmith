@@ -1,11 +1,12 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"encoding/json"
 )
 
 var (
@@ -104,6 +105,23 @@ func main() {
 
 		fmt.Printf(" -> Base image loaded: %s (Layers: %d)\n", baseManifest.Digest, len(currentLayers))
 
+		// --- CACHE SETUP ---
+		prevLayerDigest := baseManifest.Digest
+		cascadeMiss := false
+
+		var cacheIndex CacheIndex
+		if !noCache {
+			var err error
+			cacheIndex, err = LoadCacheIndex()
+			if err != nil {
+				fmt.Printf("Warning: could not load cache index, proceeding without cache: %v\n", err)
+				noCache = true
+			}
+		}
+		if cacheIndex == nil {
+			cacheIndex = make(CacheIndex)
+		}
+
 		// --- BUILD ENGINE: Instruction Loop ---
 		for i := 1; i < len(instructions); i++ {
 			inst := instructions[i]
@@ -150,9 +168,63 @@ func main() {
 				currentConfig.Cmd = cmdArray
 
 			case "COPY", "RUN":
-				// TODO: Step 5 - Layer producing instructions and Build Cache
-				fmt.Println(" -> (TODO: Implement layer creation and caching)")
+				// --- Build Cache Logic ---
+				var copySrcHash string
+
+				if inst.Type == "COPY" {
+					// Parse COPY args: <src> <dest>
+					copyParts := strings.Fields(inst.Args)
+					if len(copyParts) != 2 {
+						fmt.Printf("Build failed: invalid COPY format on line %d. Expected: COPY <src> <dest>\n", inst.LineNum)
+						os.Exit(1)
+					}
+					srcPattern := copyParts[0]
+
+					var err error
+					copySrcHash, err = hashCopySources(contextDir, srcPattern)
+					if err != nil {
+						fmt.Printf("Build failed: %v\n", err)
+						os.Exit(1)
+					}
+				}
+
+				cacheKey := ComputeCacheKey(prevLayerDigest, inst.Raw, currentConfig.WorkingDir, currentConfig.Env, copySrcHash)
+
+				// Check cache (unless --no-cache or cascade miss)
+				if !noCache && !cascadeMiss {
+					if layerDigest, found := cacheIndex[cacheKey]; found && layerExistsOnDisk(layerDigest) {
+						// Cache hit: reuse the existing layer
+						fmt.Println(" [CACHE HIT]")
+						prevLayerDigest = layerDigest
+						continue
+					}
+				}
+
+				// Cache miss (or forced miss)
+				fmt.Println(" [CACHE MISS]")
+				cascadeMiss = true
+
+				// TODO: Execute the actual layer creation here.
+				// For now, generate a placeholder layer digest.
+				newLayerDigest := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(cacheKey)))
+				fmt.Printf(" -> (stub) New layer: %s\n", newLayerDigest)
+
+				// Persist a stub layer artifact so future cache lookups can reuse it.
+				stubLayerPath := filepath.Join(layersDir, digestToFilename(newLayerDigest))
+				if err := os.WriteFile(stubLayerPath, []byte("docksmith stub layer\n"), 0644); err != nil {
+					fmt.Printf("Build failed: could not persist stub layer %s: %v\n", newLayerDigest, err)
+					os.Exit(1)
+				}
+
+				// Update the cache index
+				cacheIndex[cacheKey] = newLayerDigest
+				prevLayerDigest = newLayerDigest
 			}
+		}
+
+		// Save the cache index after the build
+		if err := SaveCacheIndex(cacheIndex); err != nil {
+			fmt.Printf("Warning: failed to save cache index: %v\n", err)
 		}
 
 		// At the end of the build, we will save the final manifest

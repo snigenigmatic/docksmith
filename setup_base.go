@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -42,7 +43,8 @@ func main() {
 	tmpFile.Close()
 
 	layerDigest := fmt.Sprintf("sha256:%x", hasher.Sum(nil))
-	layerPath := filepath.Join(layersDir, layerDigest)
+	layerFilename := strings.ReplaceAll(layerDigest, ":", "_")
+	layerPath := filepath.Join(layersDir, layerFilename)
 
 	// 3. Move layer to the content-addressed store
 	os.Rename(tmpFile.Name(), layerPath)
@@ -55,9 +57,9 @@ func main() {
 		"digest":  "",
 		"created": time.Now().UTC().Format(time.RFC3339),
 		"config": map[string]interface{}{
-			"Env":[]string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
-			"Cmd":[]string{"/bin/sh"},
-			"WorkingDir": "/",
+			"env":[]string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+			"cmd":[]string{"/bin/sh"},
+			"working_dir": "/",
 		},
 		"layers": []map[string]interface{}{
 			{
@@ -75,7 +77,8 @@ func main() {
 	manifest["digest"] = manifestDigest
 
 	finalBytes, _ := json.MarshalIndent(manifest, "", "  ")
-	manifestPath := filepath.Join(imagesDir, manifestDigest)
+	manifestFilename := strings.ReplaceAll(manifestDigest, ":", "_")
+	manifestPath := filepath.Join(imagesDir, manifestFilename)
 	os.WriteFile(manifestPath, finalBytes, 0644)
 
 	fmt.Printf("Successfully imported alpine:3.18\nManifest: %s\n", manifestDigest)
