@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -125,7 +124,7 @@ func main() {
 		// --- BUILD ENGINE: Instruction Loop ---
 		for i := 1; i < len(instructions); i++ {
 			inst := instructions[i]
-			
+
 			// Print the step header
 			fmt.Printf("Step %d/%d : %s\n", i+1, len(instructions), inst.Raw)
 
@@ -197,28 +196,61 @@ func main() {
 						fmt.Println(" [CACHE HIT]")
 						prevLayerDigest = layerDigest
 						continue
+					} else {
 					}
 				}
 
-				// Cache miss (or forced miss)
-				fmt.Println(" [CACHE MISS]")
 				cascadeMiss = true
+				fmt.Printf(" ---> [CACHE MISS] Executing %s...\n", inst.Type)
 
-				// TODO: Execute the actual layer creation here.
-				// For now, generate a placeholder layer digest.
-				newLayerDigest := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(cacheKey)))
-				fmt.Printf(" -> (stub) New layer: %s\n", newLayerDigest)
+				// 1. Create a temporary rootfs directory
+				rootfs, err := os.MkdirTemp("", "docksmith-rootfs-*")
+				if err != nil {
+					fmt.Printf("Build failed: could not create temp rootfs: %v\n", err)
+					os.Exit(1)
+				}
+				defer os.RemoveAll(rootfs)
 
-				// Persist a stub layer artifact so future cache lookups can reuse it.
-				stubLayerPath := filepath.Join(layersDir, digestToFilename(newLayerDigest))
-				if err := os.WriteFile(stubLayerPath, []byte("docksmith stub layer\n"), 0644); err != nil {
-					fmt.Printf("Build failed: could not persist stub layer %s: %v\n", newLayerDigest, err)
+				// 2. Extract all previous layers into the rootfs to assemble the filesystem
+				for _, layer := range currentLayers {
+					if err := ExtractLayer(layer.Digest, rootfs); err != nil {
+						fmt.Printf("Build failed: could not extract layer %s: %v\n", layer.Digest, err)
+						os.Exit(1)
+					}
+				}
+
+				// 3. Take a snapshot of the filesystem before execution
+				beforeState, err := SnapshotFS(rootfs)
+				if err != nil {
+					fmt.Printf("Build failed: could not snapshot fs: %v\n", err)
 					os.Exit(1)
 				}
 
-				// Update the cache index
-				cacheIndex[cacheKey] = newLayerDigest
-				prevLayerDigest = newLayerDigest
+				// 4. Execute the instruction (Isolated!)
+				if err := ExecuteInstruction(inst, rootfs, currentConfig, contextDir); err != nil {
+					fmt.Printf("Build failed: execution error: %v\n", err)
+					os.Exit(1)
+				}
+
+				// 5. Compute the delta, create the tarball, and get the new digest
+				newDigest, layerSize, err := CreateDeltaTar(rootfs, beforeState)
+				if err != nil {
+					fmt.Printf("Build failed: could not create layer tar: %v\n", err)
+					os.Exit(1)
+				}
+
+				// 6. Update state and cache
+				currentLayers = append(currentLayers, layer{
+					Digest:    newDigest,
+					Size:      layerSize,
+					CreatedBy: inst.Raw,
+				})
+
+				cacheIndex[cacheKey] = newDigest
+				SaveCacheIndex(cacheIndex)
+				prevLayerDigest = newDigest
+
+				fmt.Printf(" ---> Created layer %s\n", newDigest[:12])
 			}
 		}
 
@@ -228,7 +260,7 @@ func main() {
 		}
 
 		// At the end of the build, we will save the final manifest
-		fmt.Printf("\nFinal Config State:\n WorkingDir: %s\n Env: %v\n Cmd: %v\n", 
+		fmt.Printf("\nFinal Config State:\n WorkingDir: %s\n Env: %v\n Cmd: %v\n",
 			currentConfig.WorkingDir, currentConfig.Env, currentConfig.Cmd)
 
 	case "images":
