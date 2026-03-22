@@ -82,9 +82,15 @@ func executeRun(command, rootfs string, config config) error {
 	// HARD REQUIREMENT: OS-Level Process Isolation
 	// We use Chroot to change the root filesystem, and Cloneflags to create new namespaces
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Chroot:     rootfs,
-		Cloneflags: syscall.CLONE_NEWNS | syscall.CLONE_NEWPID | syscall.CLONE_NEWUTS,
-	}
+    Chroot:     rootfs,
+    Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID | syscall.CLONE_NEWUTS,
+    UidMappings: []syscall.SysProcIDMap{
+        {ContainerID: 0, HostID: os.Getuid(), Size: 1},
+    },
+    GidMappings: []syscall.SysProcIDMap{
+        {ContainerID: 0, HostID: os.Getgid(), Size: 1},
+    },
+}
 
 	// Note: For a fully featured runtime, we would also mount /proc and /dev inside the rootfs here.
 	// For the simplified constraints of this project, basic Chroot + Namespaces satisfies the requirement.
