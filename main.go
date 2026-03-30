@@ -3,9 +3,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"text/tabwriter"
 )
 
 var (
@@ -265,7 +268,10 @@ func main() {
 
 	case "images":
 		// Example: docksmith images
-		fmt.Println("TODO: Implement images")
+		if err := listImages(os.Stdout, imagesDir); err != nil {
+			fmt.Printf("Failed to list images: %v\n", err)
+			os.Exit(1)
+		}
 	case "rmi":
 		// Example: docksmith rmi myapp:latest
 		fmt.Println("TODO: Implement rmi")
@@ -286,4 +292,57 @@ func printUsage() {
 	fmt.Println("  docksmith images")
 	fmt.Println("  docksmith rmi <name:tag>")
 	fmt.Println("  docksmith run <name:tag> [cmd] [-e KEY=VALUE...]")
+}
+
+func listImages(out io.Writer, imagesPath string) error {
+	entries, err := os.ReadDir(imagesPath)
+	if err != nil {
+		return err
+	}
+
+	var manifests []Manifest
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+
+		manifestPath := filepath.Join(imagesPath, entry.Name())
+		data, err := os.ReadFile(manifestPath)
+		if err != nil {
+			continue
+		}
+
+		var m Manifest
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue
+		}
+
+		manifests = append(manifests, m)
+	}
+
+	if len(manifests) == 0 {
+		_, err := fmt.Fprintln(out, "No images found.")
+		return err
+	}
+
+	sort.Slice(manifests, func(i, j int) bool {
+		if manifests[i].Name == manifests[j].Name {
+			return manifests[i].Tag < manifests[j].Tag
+		}
+		return manifests[i].Name < manifests[j].Name
+	})
+
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tTAG\tIMAGE ID\tCREATED")
+
+	for _, m := range manifests {
+		imageID := strings.TrimPrefix(m.Digest, "sha256:")
+		if len(imageID) > 12 {
+			imageID = imageID[:12]
+		}
+
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", m.Name, m.Tag, imageID, m.Created)
+	}
+
+	return w.Flush()
 }
