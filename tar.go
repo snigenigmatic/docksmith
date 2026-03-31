@@ -26,6 +26,10 @@ func ExtractLayer(layerDigest, rootfs string) error {
 	if err == nil {
 		defer gzipReader.Close()
 		reader = gzipReader
+	} else {
+		// ADD THIS: The gzip reader consumed bytes trying to find a header.
+		// We must reset the file pointer to the beginning for the tar reader.
+		file.Seek(0, io.SeekStart)
 	}
 
 	tr := tar.NewReader(reader)
