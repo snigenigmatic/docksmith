@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"text/tabwriter"
+	"time"
 )
 
 var (
@@ -265,6 +266,43 @@ func main() {
 		// At the end of the build, we will save the final manifest
 		fmt.Printf("\nFinal Config State:\n WorkingDir: %s\n Env: %v\n Cmd: %v\n",
 			currentConfig.WorkingDir, currentConfig.Env, currentConfig.Cmd)
+
+		// --- ADD THIS BLOCK ---
+		// Parse the target image name and tag from the -t flag
+		targetParts := strings.Split(tag, ":")
+		targetName := targetParts[0]
+		targetTag := "latest"
+		if len(targetParts) > 1 {
+			targetTag = targetParts[1]
+		}
+
+		// Construct the final manifest
+		finalManifest := Manifest{
+			Name:    targetName,
+			Tag:     targetTag,
+			Created: time.Now().UTC().Format(time.RFC3339),
+			Config:  currentConfig,
+			Layers:  currentLayers,
+		}
+
+		// Compute the digest and get the JSON payload
+		manifestBytes, err := finalManifest.ComputeAndSetDigest()
+		if err != nil {
+			fmt.Printf("Build failed: could not compute manifest digest: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Save to the images directory
+		manifestFilename := strings.ReplaceAll(finalManifest.Digest, ":", "_") + ".json"
+		manifestPath := filepath.Join(imagesDir, manifestFilename)
+		
+		if err := os.WriteFile(manifestPath, manifestBytes, 0644); err != nil {
+			fmt.Printf("Build failed: could not save manifest: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("\nSuccessfully built %s:%s\nDigest: %s\n", targetName, targetTag, finalManifest.Digest)
+		// --- END ADDED BLOCK ---
 
 	case "images":
 		// Example: docksmith images

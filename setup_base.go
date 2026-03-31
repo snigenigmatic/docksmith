@@ -77,7 +77,7 @@ func main() {
 	manifest["digest"] = manifestDigest
 
 	finalBytes, _ := json.MarshalIndent(manifest, "", "  ")
-	manifestFilename := strings.ReplaceAll(manifestDigest, ":", "_")
+	manifestFilename := strings.ReplaceAll(manifestDigest, ":", "_") + ".json"
 	manifestPath := filepath.Join(imagesDir, manifestFilename)
 	os.WriteFile(manifestPath, finalBytes, 0644)
 
