@@ -116,7 +116,7 @@ func CreateDeltaTar(rootfs string, beforeState map[string]os.FileInfo) (string, 
 	sort.Strings(changedFiles)
 
 	// 3. Create a temporary file to hold the tar
-	tmpFile, err := os.CreateTemp("", "layer-*.tar")
+	tmpFile, err := os.CreateTemp(layersDir, "layer-*.tar")
 	if err != nil {
 		return "", 0, err
 	}
@@ -174,8 +174,33 @@ func CreateDeltaTar(rootfs string, beforeState map[string]os.FileInfo) (string, 
 	size := stat.Size()
 
 	if err := os.Rename(tmpFile.Name(), layerPath); err != nil {
-		return "", 0, err
+		if err := copyFile(tmpFile.Name(), layerPath); err != nil {
+			return "", 0, err
+		}
+		if err := os.Remove(tmpFile.Name()); err != nil && !os.IsNotExist(err) {
+			return "", 0, err
+		}
 	}
 
 	return digest, size, nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+
+	return out.Close()
 }

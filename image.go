@@ -1,32 +1,86 @@
 package main
 
-import(
+import (
 	"crypto/sha256"
-	"fmt"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 )
 
 // Manifest - represents the image's internal structure, including its layers and metadata
-type Manifest struct{
-	Name string `json:"name"`
-	Tag string `json:"tag"`
-	Digest string `json:"digest"`
-	Created string `json:"created"`
-	Config config `json:"config"`
-	Layers []layer `json:"layers"`
+type Manifest struct {
+	Name    string  `json:"name"`
+	Tag     string  `json:"tag"`
+	Digest  string  `json:"digest"`
+	Created string  `json:"created"`
+	Config  config  `json:"config"`
+	Layers  []layer `json:"layers"`
 }
 
 type config struct {
-	Env []string `json:"env"`
-	Cmd []string `json:"cmd"`
-	WorkingDir string `json:"working_dir"`
+	Env        []string
+	Cmd        []string
+	WorkingDir string
+}
+
+func (c config) MarshalJSON() ([]byte, error) {
+	type configJSON struct {
+		Env        []string `json:"Env"`
+		Cmd        []string `json:"Cmd"`
+		WorkingDir string   `json:"WorkingDir"`
+	}
+
+	return json.Marshal(configJSON{
+		Env:        c.Env,
+		Cmd:        c.Cmd,
+		WorkingDir: c.WorkingDir,
+	})
+}
+
+func (c *config) UnmarshalJSON(data []byte) error {
+	type configJSON struct {
+		Env        []string `json:"Env"`
+		Cmd        []string `json:"Cmd"`
+		WorkingDir string   `json:"WorkingDir"`
+	}
+	type legacyConfigJSON struct {
+		Env        []string `json:"env"`
+		Cmd        []string `json:"cmd"`
+		WorkingDir string   `json:"working_dir"`
+	}
+
+	var current configJSON
+	if err := json.Unmarshal(data, &current); err != nil {
+		return err
+	}
+
+	var legacy legacyConfigJSON
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return err
+	}
+
+	c.Env = current.Env
+	if len(c.Env) == 0 {
+		c.Env = legacy.Env
+	}
+
+	c.Cmd = current.Cmd
+	if len(c.Cmd) == 0 {
+		c.Cmd = legacy.Cmd
+	}
+
+	c.WorkingDir = current.WorkingDir
+	if c.WorkingDir == "" {
+		c.WorkingDir = legacy.WorkingDir
+	}
+
+	return nil
 }
 
 type layer struct {
-	Digest string `json:"digest"`
-	Size int64 `json:"size"`
+	Digest    string `json:"digest"`
+	Size      int64  `json:"size"`
 	CreatedBy string `json:"created_by"`
 }
 

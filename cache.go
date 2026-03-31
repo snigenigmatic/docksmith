@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -97,58 +98,9 @@ func ComputeCacheKey(prevLayerDigest, instructionRaw, workdir string, env []stri
 //
 // The srcPattern is resolved relative to the contextDir (the build context).
 func hashCopySources(contextDir, srcPattern string) (string, error) {
-	// Resolve the glob relative to the context directory
-	fullPattern := filepath.Join(contextDir, srcPattern)
-
-	matches, err := filepath.Glob(fullPattern)
+	matches, err := resolveCopySources(contextDir, srcPattern)
 	if err != nil {
-		return "", fmt.Errorf("invalid glob pattern %q: %w", srcPattern, err)
-	}
-
-	// If the pattern is "." (the entire context), walk the directory instead
-	if srcPattern == "." {
-		matches = nil
-		walkRoot := contextDir
-		err := filepath.Walk(walkRoot, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			// Only include regular files
-			if !info.IsDir() {
-				matches = append(matches, path)
-			}
-			return nil
-		})
-		if err != nil {
-			return "", fmt.Errorf("failed to walk context directory: %w", err)
-		}
-	} else {
-		// For glob results, expand any directories and filter to regular files only
-		var expanded []string
-		for _, match := range matches {
-			info, err := os.Stat(match)
-			if err != nil {
-				return "", fmt.Errorf("failed to stat %q: %w", match, err)
-			}
-			if info.IsDir() {
-				// Walk the matched directory
-				err := filepath.Walk(match, func(path string, fi os.FileInfo, err error) error {
-					if err != nil {
-						return err
-					}
-					if !fi.IsDir() {
-						expanded = append(expanded, path)
-					}
-					return nil
-				})
-				if err != nil {
-					return "", fmt.Errorf("failed to walk directory %q: %w", match, err)
-				}
-			} else {
-				expanded = append(expanded, match)
-			}
-		}
-		matches = expanded
+		return "", err
 	}
 
 	if len(matches) == 0 {
@@ -175,6 +127,96 @@ func hashCopySources(contextDir, srcPattern string) (string, error) {
 	return fmt.Sprintf("sha256:%x", hasher.Sum(nil)), nil
 }
 
+func resolveCopySources(contextDir, srcPattern string) ([]string, error) {
+	if srcPattern == "." {
+		return walkRegularFiles(contextDir)
+	}
+
+	cleanPattern := filepath.Clean(srcPattern)
+	fullPath := filepath.Join(contextDir, cleanPattern)
+	if info, err := os.Stat(fullPath); err == nil {
+		if info.IsDir() {
+			return walkRegularFiles(fullPath)
+		}
+		return []string{fullPath}, nil
+	}
+
+	matcher, err := compileCopyPattern(cleanPattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid glob pattern %q: %w", srcPattern, err)
+	}
+
+	var matches []string
+	err = filepath.Walk(contextDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+
+		rel, err := filepath.Rel(contextDir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if matcher.MatchString(rel) {
+			matches = append(matches, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to walk context directory: %w", err)
+	}
+
+	return matches, nil
+}
+
+func walkRegularFiles(root string) ([]string, error) {
+	var matches []string
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			matches = append(matches, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to walk %q: %w", root, err)
+	}
+	return matches, nil
+}
+
+func compileCopyPattern(pattern string) (*regexp.Regexp, error) {
+	pattern = filepath.ToSlash(filepath.Clean(pattern))
+	var sb strings.Builder
+	sb.WriteString("^")
+
+	for i := 0; i < len(pattern); {
+		switch pattern[i] {
+		case '*':
+			if i+1 < len(pattern) && pattern[i+1] == '*' {
+				sb.WriteString(".*")
+				i += 2
+				continue
+			}
+			sb.WriteString("[^/]*")
+			i++
+		case '?':
+			sb.WriteString("[^/]")
+			i++
+		default:
+			sb.WriteString(regexp.QuoteMeta(string(pattern[i])))
+			i++
+		}
+	}
+
+	sb.WriteString("$")
+	return regexp.Compile(sb.String())
+}
+
 // digestToFilename converts a digest like "sha256:abcdef..." to a
 // filesystem-safe name like "sha256_abcdef..." (Windows does not allow ':').
 func digestToFilename(digest string) string {
@@ -186,4 +228,13 @@ func layerExistsOnDisk(layerDigest string) bool {
 	layerPath := filepath.Join(layersDir, digestToFilename(layerDigest))
 	_, err := os.Stat(layerPath)
 	return err == nil
+}
+
+func layerSizeOnDisk(layerDigest string) int64 {
+	layerPath := filepath.Join(layersDir, digestToFilename(layerDigest))
+	info, err := os.Stat(layerPath)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
 }

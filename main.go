@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -45,6 +47,7 @@ func main() {
 
 	switch command {
 	case "build":
+		buildStart := time.Now()
 		// Example: docksmith build -t myapp:latest .
 		// basic parsing
 		var tag, contextDir string
@@ -69,6 +72,13 @@ func main() {
 		}
 
 		fmt.Printf("Building %s from context %s (No-cache: %v)\n", tag, contextDir, noCache)
+
+		targetName, targetTag := parseImageRef(tag)
+		existingTarget, existingTargetPath, err := findImageWithPath(targetName, targetTag)
+		if err != nil && !strings.Contains(err.Error(), "not found") {
+			fmt.Printf("Build failed: %v\n", err)
+			os.Exit(1)
+		}
 
 		// Parse the Docksmithfile
 		instructions, err := ParseDocksmithfile(contextDir)
@@ -171,6 +181,7 @@ func main() {
 				currentConfig.Cmd = cmdArray
 
 			case "COPY", "RUN":
+				stepStart := time.Now()
 				// --- Build Cache Logic ---
 				var copySrcHash string
 
@@ -197,10 +208,14 @@ func main() {
 				if !noCache && !cascadeMiss {
 					if layerDigest, found := cacheIndex[cacheKey]; found && layerExistsOnDisk(layerDigest) {
 						// Cache hit: reuse the existing layer
-						fmt.Println(" [CACHE HIT]")
+						fmt.Printf(" ---> [CACHE HIT] %.2fs\n", time.Since(stepStart).Seconds())
+						currentLayers = append(currentLayers, layer{
+							Digest:    layerDigest,
+							Size:      layerSizeOnDisk(layerDigest),
+							CreatedBy: inst.Raw,
+						})
 						prevLayerDigest = layerDigest
 						continue
-					} else {
 					}
 				}
 
@@ -221,6 +236,11 @@ func main() {
 						fmt.Printf("Build failed: could not extract layer %s: %v\n", layer.Digest, err)
 						os.Exit(1)
 					}
+				}
+
+				if err := ensureWorkdirExists(rootfs, currentConfig); err != nil {
+					fmt.Printf("Build failed: could not prepare WORKDIR %q: %v\n", currentConfig.WorkingDir, err)
+					os.Exit(1)
 				}
 
 				// 3. Take a snapshot of the filesystem before execution
@@ -250,40 +270,34 @@ func main() {
 					CreatedBy: inst.Raw,
 				})
 
-				cacheIndex[cacheKey] = newDigest
-				SaveCacheIndex(cacheIndex)
+				if !noCache {
+					cacheIndex[cacheKey] = newDigest
+				}
 				prevLayerDigest = newDigest
 
-				fmt.Printf(" ---> Created layer %s\n", newDigest[:12])
+				fmt.Printf(" ---> Created layer %s (%.2fs)\n", newDigest[:12], time.Since(stepStart).Seconds())
 			}
 		}
 
 		// Save the cache index after the build
-		if err := SaveCacheIndex(cacheIndex); err != nil {
-			fmt.Printf("Warning: failed to save cache index: %v\n", err)
+		if !noCache {
+			if err := SaveCacheIndex(cacheIndex); err != nil {
+				fmt.Printf("Warning: failed to save cache index: %v\n", err)
+			}
 		}
 
 		// At the end of the build, we will save the final manifest
 		fmt.Printf("\nFinal Config State:\n WorkingDir: %s\n Env: %v\n Cmd: %v\n",
 			currentConfig.WorkingDir, currentConfig.Env, currentConfig.Cmd)
 
-		// --- ADD THIS BLOCK ---
-		// Parse the target image name and tag from the -t flag
-		targetParts := strings.Split(tag, ":")
-		targetName := targetParts[0]
-		targetTag := "latest"
-		if len(targetParts) > 1 {
-			targetTag = targetParts[1]
-		}
-
 		// Construct the final manifest
 		finalManifest := Manifest{
-			Name:    targetName,
-			Tag:     targetTag,
-			Created: time.Now().UTC().Format(time.RFC3339),
-			Config:  currentConfig,
-			Layers:  currentLayers,
+			Name:   targetName,
+			Tag:    targetTag,
+			Config: currentConfig,
+			Layers: currentLayers,
 		}
+		finalManifest.Created = createdTimestampForBuild(existingTarget, finalManifest)
 
 		// Compute the digest and get the JSON payload
 		manifestBytes, err := finalManifest.ComputeAndSetDigest()
@@ -292,17 +306,23 @@ func main() {
 			os.Exit(1)
 		}
 
+		if existingTargetPath != "" && existingTargetPath != filepath.Join(imagesDir, strings.ReplaceAll(finalManifest.Digest, ":", "_")+".json") {
+			if err := os.Remove(existingTargetPath); err != nil && !os.IsNotExist(err) {
+				fmt.Printf("Build failed: could not replace previous manifest: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
 		// Save to the images directory
 		manifestFilename := strings.ReplaceAll(finalManifest.Digest, ":", "_") + ".json"
 		manifestPath := filepath.Join(imagesDir, manifestFilename)
-		
+
 		if err := os.WriteFile(manifestPath, manifestBytes, 0644); err != nil {
 			fmt.Printf("Build failed: could not save manifest: %v\n", err)
 			os.Exit(1)
 		}
 
-		fmt.Printf("\nSuccessfully built %s:%s\nDigest: %s\n", targetName, targetTag, finalManifest.Digest)
-		// --- END ADDED BLOCK ---
+		fmt.Printf("\nSuccessfully built %s:%s (%.2fs)\nDigest: %s\n", targetName, targetTag, time.Since(buildStart).Seconds(), finalManifest.Digest)
 
 	case "images":
 		// Example: docksmith images
@@ -311,11 +331,27 @@ func main() {
 			os.Exit(1)
 		}
 	case "rmi":
-		// Example: docksmith rmi myapp:latest
-		fmt.Println("TODO: Implement rmi")
+		if len(os.Args) != 3 {
+			fmt.Println("Usage : docksmith rmi <name:tag>")
+			os.Exit(1)
+		}
+
+		if err := removeImage(os.Args[2]); err != nil {
+			fmt.Printf("Failed to remove image: %v\n", err)
+			os.Exit(1)
+		}
 	case "run":
-		// Example: docksmith run myapp:latest
-		fmt.Println("TODO: Implement run")
+		if len(os.Args) < 3 {
+			fmt.Println("Usage : docksmith run [-e KEY=VALUE...] <name:tag> [cmd]")
+			os.Exit(1)
+		}
+
+		exitCode, err := runImage(os.Args[2:])
+		if err != nil {
+			fmt.Printf("Run failed: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(exitCode)
 	default:
 		fmt.Printf("Unknown command: %s\n", command)
 		printUsage()
@@ -329,7 +365,7 @@ func printUsage() {
 	fmt.Println("  docksmith build -t <name:tag> <context> [--no-cache]")
 	fmt.Println("  docksmith images")
 	fmt.Println("  docksmith rmi <name:tag>")
-	fmt.Println("  docksmith run <name:tag> [cmd] [-e KEY=VALUE...]")
+	fmt.Println("  docksmith run [-e KEY=VALUE...] <name:tag> [cmd]")
 }
 
 func listImages(out io.Writer, imagesPath string) error {
@@ -383,4 +419,201 @@ func listImages(out io.Writer, imagesPath string) error {
 	}
 
 	return w.Flush()
+}
+
+func parseImageRef(ref string) (string, string) {
+	parts := strings.SplitN(ref, ":", 2)
+	name := parts[0]
+	tag := "latest"
+	if len(parts) == 2 && parts[1] != "" {
+		tag = parts[1]
+	}
+	return name, tag
+}
+
+func findImageWithPath(name, tag string) (*Manifest, string, error) {
+	files, err := os.ReadDir(imagesDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("could not read images directory: %w", err)
+	}
+
+	for _, f := range files {
+		if f.IsDir() {
+			continue
+		}
+
+		path := filepath.Join(imagesDir, f.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+
+		var m Manifest
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue
+		}
+
+		if m.Name == name && m.Tag == tag {
+			return &m, path, nil
+		}
+	}
+
+	return nil, "", fmt.Errorf("image %s:%s not found in local store", name, tag)
+}
+
+func createdTimestampForBuild(existing *Manifest, next Manifest) string {
+	if existing != nil &&
+		existing.Name == next.Name &&
+		existing.Tag == next.Tag &&
+		reflect.DeepEqual(existing.Config, next.Config) &&
+		reflect.DeepEqual(existing.Layers, next.Layers) {
+		return existing.Created
+	}
+
+	return time.Now().UTC().Format(time.RFC3339)
+}
+
+func removeImage(ref string) error {
+	name, tag := parseImageRef(ref)
+	manifest, manifestPath, err := findImageWithPath(name, tag)
+	if err != nil {
+		return err
+	}
+
+	for _, layer := range manifest.Layers {
+		layerPath := filepath.Join(layersDir, digestToFilename(layer.Digest))
+		if err := os.Remove(layerPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("could not remove layer %s: %w", layer.Digest, err)
+		}
+	}
+
+	if err := os.Remove(manifestPath); err != nil {
+		return fmt.Errorf("could not remove manifest: %w", err)
+	}
+
+	fmt.Printf("Removed image %s:%s\n", name, tag)
+	return nil
+}
+
+func ensureWorkdirExists(rootfs string, cfg config) error {
+	workdir := normalizeContainerPath(cfg.WorkingDir)
+	if workdir == "/" {
+		return nil
+	}
+	return os.MkdirAll(filepath.Join(rootfs, strings.TrimPrefix(workdir, "/")), 0755)
+}
+
+func runImage(args []string) (int, error) {
+	imageRef, cmdOverride, envOverrides, err := parseRunInvocation(args)
+	if err != nil {
+		return 0, err
+	}
+
+	imageName, imageTag := parseImageRef(imageRef)
+	manifest, err := FindImage(imageName, imageTag)
+	if err != nil {
+		return 0, err
+	}
+
+	command := manifest.Config.Cmd
+	if len(cmdOverride) > 0 {
+		command = cmdOverride
+	}
+	if len(command) == 0 {
+		return 0, fmt.Errorf("no command specified: image %s:%s has no default CMD and no override was provided", imageName, imageTag)
+	}
+
+	runtimeConfig := manifest.Config
+	runtimeConfig.Env = mergeEnv(runtimeConfig.Env, envOverrides)
+
+	rootfs, err := os.MkdirTemp("", "docksmith-run-*")
+	if err != nil {
+		return 0, fmt.Errorf("could not create temp rootfs: %w", err)
+	}
+	defer os.RemoveAll(rootfs)
+
+	for _, imageLayer := range manifest.Layers {
+		if err := ExtractLayer(imageLayer.Digest, rootfs); err != nil {
+			return 0, fmt.Errorf("could not extract layer %s: %w", imageLayer.Digest, err)
+		}
+	}
+
+	if err := ensureWorkdirExists(rootfs, runtimeConfig); err != nil {
+		return 0, fmt.Errorf("could not prepare WORKDIR %q: %w", runtimeConfig.WorkingDir, err)
+	}
+
+	resolvedCommand, err := resolveContainerCommand(rootfs, command, runtimeConfig.Env)
+	if err != nil {
+		return 0, err
+	}
+
+	cmd, err := newIsolatedCommand(rootfs, runtimeConfig, resolvedCommand)
+	if err != nil {
+		return 0, err
+	}
+
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode := exitErr.ExitCode()
+			fmt.Printf("Exit code: %d\n", exitCode)
+			return exitCode, nil
+		}
+		return 0, err
+	}
+
+	fmt.Println("Exit code: 0")
+	return 0, nil
+}
+
+func parseRunInvocation(args []string) (string, []string, []string, error) {
+	var positional []string
+	var envOverrides []string
+
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-e" {
+			if i+1 >= len(args) {
+				return "", nil, nil, fmt.Errorf("missing value for -e, expected KEY=VALUE")
+			}
+			if !strings.Contains(args[i+1], "=") {
+				return "", nil, nil, fmt.Errorf("invalid environment override %q, expected KEY=VALUE", args[i+1])
+			}
+			envOverrides = append(envOverrides, args[i+1])
+			i++
+			continue
+		}
+		positional = append(positional, args[i])
+	}
+
+	if len(positional) == 0 {
+		return "", nil, nil, fmt.Errorf("missing image reference")
+	}
+
+	imageRef := positional[0]
+	command := positional[1:]
+
+	return imageRef, command, envOverrides, nil
+}
+
+func mergeEnv(base, overrides []string) []string {
+	merged := append([]string(nil), base...)
+	indexByKey := make(map[string]int, len(merged))
+
+	for i, envVar := range merged {
+		key, _, ok := strings.Cut(envVar, "=")
+		if ok {
+			indexByKey[key] = i
+		}
+	}
+
+	for _, envVar := range overrides {
+		key, _, _ := strings.Cut(envVar, "=")
+		if idx, found := indexByKey[key]; found {
+			merged[idx] = envVar
+			continue
+		}
+		indexByKey[key] = len(merged)
+		merged = append(merged, envVar)
+	}
+
+	return merged
 }

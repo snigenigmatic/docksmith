@@ -19,11 +19,18 @@ func main() {
 	homeDir, _ := os.UserHomeDir()
 	layersDir := filepath.Join(homeDir, ".docksmith", "layers")
 	imagesDir := filepath.Join(homeDir, ".docksmith", "images")
+	cacheDir := filepath.Join(homeDir, ".docksmith", "cache")
+
+	for _, dir := range []string{layersDir, imagesDir, cacheDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			panic(err)
+		}
+	}
 
 	// 1. Download Alpine Mini Rootfs
 	fmt.Println("Downloading Alpine 3.18 base layer...")
 	url := "https://dl-cdn.alpinelinux.org/alpine/v3.18/releases/x86_64/alpine-minirootfs-3.18.4-x86_64.tar.gz"
-	
+
 	resp, err := http.Get(url)
 	if err != nil {
 		panic(err)
@@ -57,9 +64,9 @@ func main() {
 		"digest":  "",
 		"created": time.Now().UTC().Format(time.RFC3339),
 		"config": map[string]interface{}{
-			"env":[]string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
-			"cmd":[]string{"/bin/sh"},
-			"working_dir": "/",
+			"Env":        []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+			"Cmd":        []string{"/bin/sh"},
+			"WorkingDir": "/",
 		},
 		"layers": []map[string]interface{}{
 			{
@@ -79,6 +86,29 @@ func main() {
 	finalBytes, _ := json.MarshalIndent(manifest, "", "  ")
 	manifestFilename := strings.ReplaceAll(manifestDigest, ":", "_") + ".json"
 	manifestPath := filepath.Join(imagesDir, manifestFilename)
+
+	entries, _ := os.ReadDir(imagesDir)
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+
+		path := filepath.Join(imagesDir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+
+		var existing map[string]interface{}
+		if err := json.Unmarshal(data, &existing); err != nil {
+			continue
+		}
+
+		if existing["name"] == "alpine" && existing["tag"] == "3.18" && path != manifestPath {
+			_ = os.Remove(path)
+		}
+	}
+
 	os.WriteFile(manifestPath, finalBytes, 0644)
 
 	fmt.Printf("Successfully imported alpine:3.18\nManifest: %s\n", manifestDigest)

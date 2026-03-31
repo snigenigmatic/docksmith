@@ -22,78 +22,142 @@ func ExecuteInstruction(inst Instruction, rootfs string, config config, contextD
 
 func executeCopy(args, rootfs, contextDir string) error {
 	parts := strings.Fields(args)
-	if len(parts) < 2 {
+	if len(parts) != 2 {
 		return fmt.Errorf("invalid COPY format")
 	}
 	srcPattern := parts[0]
 	destPath := parts[1]
 
-	// Resolve destination inside the rootfs
-	absDest := filepath.Join(rootfs, destPath)
-	os.MkdirAll(absDest, 0755)
+	matches, err := resolveCopySources(contextDir, srcPattern)
+	if err != nil {
+		return err
+	}
+	if len(matches) == 0 {
+		return fmt.Errorf("COPY source %q matched no files in context %q", srcPattern, contextDir)
+	}
 
-	// Simplified copy logic (in a real app, handle full globbing and recursive dir copies)
-	// For now, we copy files that match the pattern from the context dir
-	return filepath.Walk(contextDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
+	destPath = normalizeContainerPath(destPath)
+	absDest := filepath.Join(rootfs, strings.TrimPrefix(destPath, "/"))
+	if err := os.MkdirAll(absDest, 0755); err != nil {
+		return err
+	}
+
+	for _, path := range matches {
+		rel, err := filepath.Rel(contextDir, path)
+		if err != nil {
+			return err
 		}
 
-		rel, _ := filepath.Rel(contextDir, path)
-		match, _ := filepath.Match(srcPattern, rel)
-		if srcPattern == "." || match {
-			// Copy file
-			srcFile, _ := os.Open(path)
-			defer srcFile.Close()
-
-			destFilePath := filepath.Join(absDest, filepath.Base(path))
-			if srcPattern == "." {
-				destFilePath = filepath.Join(absDest, rel)
-				os.MkdirAll(filepath.Dir(destFilePath), 0755)
-			}
-
-			dstFile, _ := os.Create(destFilePath)
-			defer dstFile.Close()
-			io.Copy(dstFile, srcFile)
+		destFilePath := filepath.Join(absDest, filepath.Base(path))
+		if srcPattern == "." || strings.Contains(srcPattern, string(filepath.Separator)) || strings.Contains(srcPattern, "/") || strings.Contains(srcPattern, "*") {
+			destFilePath = filepath.Join(absDest, rel)
 		}
-		return nil
-	})
+
+		if err := os.MkdirAll(filepath.Dir(destFilePath), 0755); err != nil {
+			return err
+		}
+
+		srcFile, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+
+		dstFile, err := os.Create(destFilePath)
+		if err != nil {
+			srcFile.Close()
+			return err
+		}
+
+		if _, err := io.Copy(dstFile, srcFile); err != nil {
+			dstFile.Close()
+			srcFile.Close()
+			return err
+		}
+		if err := dstFile.Close(); err != nil {
+			srcFile.Close()
+			return err
+		}
+		if err := srcFile.Close(); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func executeRun(command, rootfs string, config config) error {
-	// Setup the command to run via shell
-	cmd := exec.Command("/bin/sh", "-c", command)
+	cmd, err := newIsolatedCommand(rootfs, config, []string{"/bin/sh", "-c", command})
+	if err != nil {
+		return err
+	}
+	return cmd.Run()
+}
 
-	// Route output to the user's terminal
+func newIsolatedCommand(rootfs string, config config, argv []string) (*exec.Cmd, error) {
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("no command specified")
+	}
+
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
-
-	// Set Working Directory (default to / if empty)
-	workDir := config.WorkingDir
-	if workDir == "" {
-		workDir = "/"
-	}
-	cmd.Dir = workDir
-
-	// Inject Environment Variables
+	cmd.Dir = normalizeContainerPath(config.WorkingDir)
 	cmd.Env = config.Env
 
-	// HARD REQUIREMENT: OS-Level Process Isolation
-	// We use Chroot to change the root filesystem, and Cloneflags to create new namespaces
+	// We use the same Chroot + namespace isolation primitive for both build RUN and docksmith run.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-    Chroot:     rootfs,
-    Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID | syscall.CLONE_NEWUTS,
-    UidMappings: []syscall.SysProcIDMap{
-        {ContainerID: 0, HostID: os.Getuid(), Size: 1},
-    },
-    GidMappings: []syscall.SysProcIDMap{
-        {ContainerID: 0, HostID: os.Getgid(), Size: 1},
-    },
+		Chroot:     rootfs,
+		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID | syscall.CLONE_NEWUTS | syscall.CLONE_NEWNET,
+		UidMappings: []syscall.SysProcIDMap{
+			{ContainerID: 0, HostID: os.Getuid(), Size: 1},
+		},
+		GidMappings: []syscall.SysProcIDMap{
+			{ContainerID: 0, HostID: os.Getgid(), Size: 1},
+		},
+	}
+
+	return cmd, nil
 }
 
-	// Note: For a fully featured runtime, we would also mount /proc and /dev inside the rootfs here.
-	// For the simplified constraints of this project, basic Chroot + Namespaces satisfies the requirement.
+func normalizeContainerPath(path string) string {
+	if path == "" {
+		return "/"
+	}
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return "/" + path
+}
 
-	return cmd.Run()
+func resolveContainerCommand(rootfs string, argv []string, env []string) ([]string, error) {
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("no command specified")
+	}
+
+	if strings.Contains(argv[0], "/") {
+		return argv, nil
+	}
+
+	searchPaths := []string{"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"}
+	for _, envVar := range env {
+		if strings.HasPrefix(envVar, "PATH=") {
+			searchPaths = strings.Split(strings.TrimPrefix(envVar, "PATH="), ":")
+			break
+		}
+	}
+
+	for _, dir := range searchPaths {
+		hostPath := filepath.Join(rootfs, strings.TrimPrefix(dir, "/"), argv[0])
+		info, err := os.Lstat(hostPath)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		resolved := make([]string, len(argv))
+		copy(resolved, argv)
+		resolved[0] = normalizeContainerPath(filepath.Join(dir, argv[0]))
+		return resolved, nil
+	}
+
+	return nil, fmt.Errorf("command %q not found in container PATH", argv[0])
 }
