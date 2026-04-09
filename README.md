@@ -1,5 +1,9 @@
 # Docksmith
 
+<p align="center">
+  <img src="assets/icon.png" alt="Docksmith icon" width="140" />
+</p>
+
 A simplified Docker-like build and runtime system written in Go.
 
 Docksmith can:
@@ -83,6 +87,29 @@ This imports `alpine:3.18` into `~/.docksmith`.
 ```bash
 ./docksmith rmi myapp:latest
 ```
+
+---
+
+## Easier commands with `just`
+
+This repo includes a `justfile` so you can run common workflows with shorter commands.
+
+Examples:
+
+```bash
+just build
+just setup-base
+just cold-build
+just warm-build
+just images
+just run
+just run-env GREETING Hola
+just run-cmd /bin/sh -c 'echo custom command'
+just no-cache
+just rmi
+```
+
+If `just` is not installed, you can continue using the direct `./docksmith ...` commands above.
 
 ---
 
