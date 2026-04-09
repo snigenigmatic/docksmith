@@ -97,66 +97,10 @@ func ComputeCacheKey(prevLayerDigest, instructionRaw, workdir string, env []stri
 //
 // The srcPattern is resolved relative to the contextDir (the build context).
 func hashCopySources(contextDir, srcPattern string) (string, error) {
-	// Resolve the glob relative to the context directory
-	fullPattern := filepath.Join(contextDir, srcPattern)
-
-	matches, err := filepath.Glob(fullPattern)
+	matches, err := resolveCopySourceFiles(contextDir, srcPattern)
 	if err != nil {
-		return "", fmt.Errorf("invalid glob pattern %q: %w", srcPattern, err)
+		return "", err
 	}
-
-	// If the pattern is "." (the entire context), walk the directory instead
-	if srcPattern == "." {
-		matches = nil
-		walkRoot := contextDir
-		err := filepath.Walk(walkRoot, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			// Only include regular files
-			if !info.IsDir() {
-				matches = append(matches, path)
-			}
-			return nil
-		})
-		if err != nil {
-			return "", fmt.Errorf("failed to walk context directory: %w", err)
-		}
-	} else {
-		// For glob results, expand any directories and filter to regular files only
-		var expanded []string
-		for _, match := range matches {
-			info, err := os.Stat(match)
-			if err != nil {
-				return "", fmt.Errorf("failed to stat %q: %w", match, err)
-			}
-			if info.IsDir() {
-				// Walk the matched directory
-				err := filepath.Walk(match, func(path string, fi os.FileInfo, err error) error {
-					if err != nil {
-						return err
-					}
-					if !fi.IsDir() {
-						expanded = append(expanded, path)
-					}
-					return nil
-				})
-				if err != nil {
-					return "", fmt.Errorf("failed to walk directory %q: %w", match, err)
-				}
-			} else {
-				expanded = append(expanded, match)
-			}
-		}
-		matches = expanded
-	}
-
-	if len(matches) == 0 {
-		return "", fmt.Errorf("COPY source %q matched no files in context %q", srcPattern, contextDir)
-	}
-
-	// Sort paths lexicographically for deterministic ordering
-	sort.Strings(matches)
 
 	// Hash all file contents in order
 	hasher := sha256.New()

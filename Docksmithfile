@@ -1,7 +1,7 @@
 FROM alpine:3.18
 WORKDIR /app
-ENV PORT=8080
+ENV GREETING=Hello
 ENV PORT=9000
-CMD ["python", "main.py"]
+CMD ["/bin/sh", "/app/main.sh"]
 COPY . /app
-RUN echo "Hello Docksmith"
+RUN chmod +x /app/main.sh && echo "build complete" > /app/build.txt
